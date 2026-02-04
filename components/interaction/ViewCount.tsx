@@ -27,7 +27,7 @@ export function ViewCount({ slug, initialCount = 0 }: ViewCountProps) {
 
         if (response.ok) {
           const data = await response.json()
-          setViewCount(data.views)
+          setViewCount(data.viewCount ?? 0)
         }
       } catch (error) {
         console.error('Failed to increment view count:', error)

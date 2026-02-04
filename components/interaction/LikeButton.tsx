@@ -36,8 +36,8 @@ export function LikeButton({
       const response = await fetch(`/api/posts/${slug}/likes`)
       if (response.ok) {
         const data = await response.json()
-        setLikes(data.likes)
-        setIsLiked(data.isLiked)
+        setLikes(data.likeCount ?? 0)
+        setIsLiked(data.isLiked ?? false)
       }
     } catch (error) {
       console.error('Failed to check like status:', error)
@@ -73,8 +73,8 @@ export function LikeButton({
         setLikes(previousLikes)
       } else {
         const data = await response.json()
-        setLikes(data.likes)
-        setIsLiked(data.isLiked)
+        setLikes(data.likeCount ?? 0)
+        setIsLiked(data.isLiked ?? false)
       }
     } catch (error) {
       console.error('Failed to toggle like:', error)

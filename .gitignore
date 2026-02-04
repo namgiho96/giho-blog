@@ -41,3 +41,6 @@ next-env.d.ts
 
 # oh-my-claudecode state
 .omc/
+
+# Claude Code state
+.claude/

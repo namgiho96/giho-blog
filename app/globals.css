@@ -2,26 +2,123 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 터미널 스타일 CSS 변수 */
 :root {
+  /* 라이트 테마 */
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #0d1117;
+  --primary: #58a6ff;
+  --secondary: #7ee787;
+  --accent: #f85149;
+  --muted: #8b949e;
+  --border: #d0d7de;
+  --card-bg: #f6f8fa;
+  --code-bg: #f6f8fa;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+.dark {
+  /* 다크 테마 - GitHub 터미널 스타일 */
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+  --primary: #58a6ff;
+  --secondary: #7ee787;
+  --accent: #f85149;
+  --muted: #8b949e;
+  --border: #30363d;
+  --card-bg: #161b22;
+  --code-bg: #161b22;
+}
+
+@layer base {
+  * {
+    @apply border-neutral-700 dark:border-neutral-600;
   }
-}
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  body {
+    @apply bg-white dark:bg-[#0d1117] text-neutral-900 dark:text-neutral-100;
+    @apply font-sans antialiased;
+  }
+
+  /* 터미널 스타일 스크롤바 */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-neutral-100 dark:bg-[#161b22];
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-neutral-400 dark:bg-neutral-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-neutral-500 dark:bg-neutral-500;
+  }
+
+  /* 텍스트 선택 색상 */
+  ::selection {
+    @apply bg-[#58a6ff]/30 text-neutral-900 dark:text-neutral-100;
+  }
+
+  /* 기본 타이포그래피 */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-mono font-bold tracking-tight;
+  }
+
+  code {
+    @apply font-mono text-sm bg-neutral-100 dark:bg-[#161b22] px-1.5 py-0.5 rounded;
+    @apply text-[#58a6ff] dark:text-[#58a6ff];
+  }
+
+  pre {
+    @apply font-mono text-sm bg-neutral-100 dark:bg-[#161b22] p-4 rounded-lg overflow-x-auto;
+    @apply border border-neutral-200 dark:border-neutral-800;
+  }
+
+  pre code {
+    @apply bg-transparent p-0 text-neutral-900 dark:text-neutral-100;
+  }
+
+  /* 링크 스타일 */
+  a {
+    @apply text-[#58a6ff] hover:underline transition-colors;
+  }
+
+  /* 터미널 커서 애니메이션 */
+  @keyframes blink {
+    0%,
+    50% {
+      opacity: 1;
+    }
+    51%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .terminal-cursor {
+    animation: blink 1s infinite;
+  }
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* 터미널 스타일 그림자 */
+  .terminal-shadow {
+    @apply shadow-[0_0_15px_rgba(88,166,255,0.3)] dark:shadow-[0_0_15px_rgba(88,166,255,0.2)];
+  }
+
+  /* 터미널 글로우 효과 */
+  .terminal-glow {
+    @apply text-[#58a6ff] drop-shadow-[0_0_8px_rgba(88,166,255,0.6)];
   }
 }

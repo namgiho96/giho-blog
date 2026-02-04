@@ -1,0 +1,82 @@
+---
+title: "유용한 TypeScript 팁"
+date: "2024-02-02"
+description: "TypeScript를 더 효과적으로 사용하는 방법들을 소개합니다."
+tags: ["typescript", "tips", "javascript"]
+---
+
+## TypeScript 활용 팁
+
+TypeScript를 사용하면서 알아두면 좋은 팁들을 정리했습니다.
+
+### 1. 유틸리티 타입 활용
+
+TypeScript는 여러 유틸리티 타입을 제공합니다:
+
+```typescript
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  password: string;
+}
+
+// Omit - 특정 속성 제외
+type PublicUser = Omit<User, "password">;
+
+// Pick - 특정 속성만 선택
+type UserCredentials = Pick<User, "email" | "password">;
+
+// Partial - 모든 속성을 선택적으로
+type PartialUser = Partial<User>;
+```
+
+### 2. 타입 가드
+
+타입을 안전하게 좁히는 방법:
+
+```typescript
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function processValue(value: unknown) {
+  if (isString(value)) {
+    // 여기서 value는 string으로 추론됨
+    console.log(value.toUpperCase());
+  }
+}
+```
+
+### 3. 제네릭으로 재사용성 높이기
+
+```typescript
+function getFirstElement<T>(arr: T[]): T | undefined {
+  return arr[0];
+}
+
+const firstNumber = getFirstElement([1, 2, 3]); // number | undefined
+const firstString = getFirstElement(["a", "b"]); // string | undefined
+```
+
+### 4. const assertions
+
+```typescript
+// 일반 객체
+const config = {
+  endpoint: "https://api.example.com",
+  timeout: 5000,
+};
+// type: { endpoint: string; timeout: number }
+
+// const assertion 사용
+const strictConfig = {
+  endpoint: "https://api.example.com",
+  timeout: 5000,
+} as const;
+// type: { readonly endpoint: "https://api.example.com"; readonly timeout: 5000 }
+```
+
+---
+
+TypeScript를 잘 활용하면 더 안전하고 유지보수하기 좋은 코드를 작성할 수 있습니다!

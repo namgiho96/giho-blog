@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
-import type { Comment } from '@/types/comment'
 import type { Database } from '@/types/database'
 
 // GET: 댓글 목록 조회
@@ -14,18 +13,19 @@ export async function GET(
 
     // Supabase가 없으면 mock 데이터 반환
     if (!supabase) {
-      const mockComments: Comment[] = [
+      const mockComments = [
         {
           id: '1',
-          post_slug: slug,
-          user_id: 'mock-user-1',
           content: '좋은 글 감사합니다!',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           user: {
-            avatar_url: null,
-            user_name: 'mock_user',
-            display_name: 'Mock User',
+            id: 'mock-user-1',
+            email: 'mock@example.com',
+            user_metadata: {
+              full_name: 'Mock User',
+              avatar_url: null,
+            },
           },
         },
       ]
@@ -54,31 +54,20 @@ export async function GET(
     // 유저 정보 가져오기
     type CommentRow = Database['public']['Tables']['comments']['Row']
     const comments = commentsData as CommentRow[]
-    const userIds = Array.from(new Set(comments.map((c) => c.user_id)))
-    const usersMap = new Map<string, { avatar_url: string | null; user_name: string | null; display_name: string | null }>()
 
-    // Supabase의 auth.users는 직접 조회할 수 없으므로,
-    // 실제로는 별도의 profiles 테이블이 필요합니다.
-    // 여기서는 기본값으로 처리합니다.
-    for (const userId of userIds) {
-      usersMap.set(userId, {
-        avatar_url: null,
-        user_name: userId.substring(0, 8),
-        display_name: `User ${userId.substring(0, 8)}`,
-      })
-    }
-
-    const result: Comment[] = comments.map((comment) => ({
+    // CommentItem 컴포넌트가 기대하는 형식으로 변환
+    const result = comments.map((comment) => ({
       id: comment.id,
-      post_slug: comment.post_slug,
-      user_id: comment.user_id,
       content: comment.content,
       created_at: comment.created_at,
       updated_at: comment.updated_at,
-      user: usersMap.get(comment.user_id) || {
-        avatar_url: null,
-        user_name: 'unknown',
-        display_name: 'Unknown User',
+      user: {
+        id: comment.user_id,
+        email: `user_${comment.user_id.substring(0, 8)}@example.com`,
+        user_metadata: {
+          full_name: `User ${comment.user_id.substring(0, 8)}`,
+          avatar_url: null,
+        },
       },
     }))
 
@@ -115,17 +104,18 @@ export async function POST(
 
     // Supabase가 없으면 mock 데이터 반환
     if (!supabase) {
-      const mockComment: Comment = {
+      const mockComment = {
         id: 'mock-' + Date.now(),
-        post_slug: slug,
-        user_id: 'mock-user-1',
         content: content.trim(),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         user: {
-          avatar_url: null,
-          user_name: 'mock_user',
-          display_name: 'Mock User',
+          id: 'mock-user-1',
+          email: 'mock@example.com',
+          user_metadata: {
+            full_name: 'Mock User',
+            avatar_url: null,
+          },
         },
       }
 
@@ -165,17 +155,18 @@ export async function POST(
     // 유저 정보 (기본값)
     type CommentRow = Database['public']['Tables']['comments']['Row']
     const newComment = newCommentData as CommentRow
-    const comment: Comment = {
+    const comment = {
       id: newComment.id,
-      post_slug: newComment.post_slug,
-      user_id: newComment.user_id,
       content: newComment.content,
       created_at: newComment.created_at,
       updated_at: newComment.updated_at,
       user: {
-        avatar_url: null,
-        user_name: user.id.substring(0, 8),
-        display_name: `User ${user.id.substring(0, 8)}`,
+        id: user.id,
+        email: user.email || `user_${user.id.substring(0, 8)}@example.com`,
+        user_metadata: {
+          full_name: user.user_metadata?.full_name || `User ${user.id.substring(0, 8)}`,
+          avatar_url: user.user_metadata?.avatar_url || null,
+        },
       },
     }
 

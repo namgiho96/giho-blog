@@ -1,5 +1,8 @@
 import { Metadata } from 'next'
 import Link from 'next/link'
+import { Suspense } from 'react'
+import { ContributionGraph } from '@/components/github/ContributionGraph'
+import { ContributionGraphSkeleton } from '@/components/github/ContributionGraphSkeleton'
 
 export const metadata: Metadata = {
   title: 'About',
@@ -174,6 +177,18 @@ export default function AboutPage() {
                     </a>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* GitHub Contributions */}
+            <div className="mb-8">
+              <div className="text-[#58a6ff] mb-4">
+                <span className="text-[#7ee787]">$</span> gh contributions --user
+              </div>
+              <div className="pl-4">
+                <Suspense fallback={<ContributionGraphSkeleton />}>
+                  <ContributionGraph />
+                </Suspense>
               </div>
             </div>
 

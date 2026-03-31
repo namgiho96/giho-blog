@@ -1,0 +1,331 @@
+---
+title: "Socket.io Redis Adapter - 멀티 인스턴스 브로드캐스팅의 비밀"
+date: "2026-03-31"
+description: "ECS에서 서버가 여러 대일 때, Socket.io 이벤트는 어떻게 모든 클라이언트에게 전달될까? Redis Adapter의 Pub/Sub 메커니즘을 내부 동작까지 파헤쳐봅니다."
+tags: ["redis", "socket.io", "pub-sub", "scaling", "websocket"]
+---
+
+## 문제: 서버가 여러 대면 브로드캐스트가 안 된다
+
+Socket.io 서버가 한 대일 때는 간단합니다. `io.emit('event', data)`를 호출하면 연결된 모든 클라이언트가 받습니다.
+
+그런데 트래픽이 늘어서 서버를 여러 대로 늘리면?
+
+```
+클라이언트 A ──→ 서버 1 ──→ io.emit('hello')
+클라이언트 B ──→ 서버 1 ──→ 받음!
+클라이언트 C ──→ 서버 2 ──→ ???  못 받음
+클라이언트 D ──→ 서버 2 ──→ ???  못 받음
+```
+
+서버 1에서 emit한 이벤트는 서버 1에 연결된 클라이언트만 받습니다. 서버 2에 연결된 클라이언트 C, D는 아무것도 모릅니다. 각 서버 인스턴스는 **자기 메모리에 있는 소켓만 알기 때문**입니다.
+
+이 문제를 해결하는 것이 **Redis Adapter**입니다.
+
+---
+
+## Redis Pub/Sub — 먼저 이것부터
+
+Redis Adapter를 이해하려면 Redis의 **Pub/Sub**(Publish/Subscribe)를 먼저 알아야 합니다.
+
+Pub/Sub는 메시지 브로커 패턴입니다:
+
+- **Publisher**: 채널에 메시지를 보내는 쪽
+- **Subscriber**: 채널을 구독하고 메시지를 받는 쪽
+- **Channel**: 메시지가 흐르는 이름 붙은 통로
+
+```
+Publisher A ──PUBLISH "chat" "hello"──→ Redis ──→ Subscriber 1 (chat 구독 중)
+                                          └──→ Subscriber 2 (chat 구독 중)
+```
+
+핵심 특징:
+
+1. **Publisher는 Subscriber를 모른다** — 그냥 채널에 던질 뿐
+2. **Subscriber는 Publisher를 모른다** — 그냥 채널에서 받을 뿐
+3. **Fire-and-forget** — 구독자가 없어도 메시지는 사라진다 (영속화 없음)
+
+Redis CLI로 보면 이렇습니다:
+
+```bash
+# 터미널 1: 구독
+SUBSCRIBE chat
+# "subscribe" "chat" 1
+
+# 터미널 2: 발행
+PUBLISH chat "hello everyone"
+# (integer) 1  ← 1명이 받았다는 뜻
+
+# 터미널 1: 메시지 수신
+# "message" "chat" "hello everyone"
+```
+
+이 단순한 메커니즘이 Socket.io 멀티 인스턴스 동기화의 근간입니다.
+
+---
+
+## Redis Adapter의 동작 원리
+
+### 설정
+
+```typescript
+import { Server } from 'socket.io'
+import { createAdapter } from '@socket.io/redis-adapter'
+import { createClient } from 'redis'
+
+const pubClient = createClient({ url: 'redis://localhost:6379' })
+const subClient = pubClient.duplicate()
+
+await Promise.all([pubClient.connect(), subClient.connect()])
+
+const io = new Server({
+  adapter: createAdapter(pubClient, subClient),
+})
+
+io.listen(3000)
+```
+
+`createAdapter`에 **두 개의 Redis 클라이언트**를 넘기는 이유가 있습니다:
+
+- **pubClient**: 다른 서버에 메시지를 **발행**할 때 사용
+- **subClient**: 다른 서버의 메시지를 **구독**할 때 사용
+
+Redis Pub/Sub에서 `SUBSCRIBE` 명령을 실행한 클라이언트는 구독 모드에 들어가서 다른 명령을 실행할 수 없습니다. 그래서 발행용과 구독용을 분리하는 겁니다.
+
+### 내부 흐름
+
+서버 1에서 `io.to('room1').emit('update', data)`를 호출하면 이런 일이 벌어집니다:
+
+```
+서버 1: io.to('room1').emit('update', data)
+  │
+  ├─ 1. 서버 1의 로컬 소켓 중 room1에 있는 소켓에 직접 전송
+  │
+  └─ 2. pubClient.PUBLISH('socket.io#/#', serializedPacket)
+         │
+         Redis (채널: socket.io#/#)
+         │
+         ├──→ 서버 2의 subClient가 수신
+         │    └─ 서버 2의 로컬 소켓 중 room1에 있는 소켓에 전송
+         │
+         └──→ 서버 3의 subClient가 수신
+              └─ 서버 3의 로컬 소켓 중 room1에 있는 소켓에 전송
+```
+
+단계별로 풀어보면:
+
+**1단계 — 로컬 전송**: 현재 서버에 연결된 소켓 중 `room1`에 속한 소켓에 직접 이벤트를 보냅니다. Redis를 거치지 않으므로 빠릅니다.
+
+**2단계 — Redis에 Publish**: 같은 패킷을 직렬화해서 Redis 채널에 발행합니다. 채널 이름은 기본적으로 `socket.io#<namespace>#` 형식입니다.
+
+**3단계 — 다른 서버가 Subscribe로 수신**: 모든 서버가 같은 채널을 구독하고 있으므로, Redis가 메시지를 각 서버의 subClient에 푸시합니다.
+
+**4단계 — 로컬 브로드캐스트**: 메시지를 받은 서버는 패킷을 역직렬화하고, 자기 로컬 소켓 중 해당 room에 속한 소켓에 전달합니다.
+
+### 전체 아키텍처 다이어그램
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   서버 1     │     │   서버 2     │     │   서버 3     │
+│  Socket.io   │     │  Socket.io   │     │  Socket.io   │
+│  + Adapter   │     │  + Adapter   │     │  + Adapter   │
+│              │     │              │     │              │
+│ pubClient ───┼──┐  │ pubClient ───┼──┐  │ pubClient ───┼──┐
+│ subClient ◄──┼──┤  │ subClient ◄──┼──┤  │ subClient ◄──┼──┤
+└──────────────┘  │  └──────────────┘  │  └──────────────┘  │
+                  │                    │                    │
+                  └────────┬───────────┴────────────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │    Redis     │
+                    │   Pub/Sub    │
+                    │              │
+                    │ Channel:     │
+                    │ socket.io#/# │
+                    └──────────────┘
+```
+
+모든 서버가 같은 Redis 채널을 구독하고 있기 때문에, 어느 서버에서 emit하든 **모든 서버가 알게 됩니다**.
+
+---
+
+## 채널 구조와 Room 라우팅
+
+Redis Adapter는 단일 채널만 사용하는 게 아닙니다. 네임스페이스별로 채널이 분리됩니다:
+
+```
+socket.io#/#          ← 기본 네임스페이스 (/)
+socket.io#/chat#      ← /chat 네임스페이스
+socket.io#/admin#     ← /admin 네임스페이스
+```
+
+하지만 **Room 단위로 채널이 분리되지는 않습니다**. 모든 Room의 메시지가 같은 네임스페이스 채널을 통해 전달되고, 받는 쪽에서 Room 멤버십을 확인하여 필터링합니다.
+
+```typescript
+// 서버 1에서 room1으로 emit
+io.to('room1').emit('update', data)
+
+// Redis 채널에는 이런 정보가 포함된 패킷이 발행됨:
+// {
+//   type: BROADCAST,
+//   rooms: ['room1'],      ← 어느 room으로 보낼지
+//   except: [],             ← 제외할 소켓 ID
+//   data: ['update', data]  ← 이벤트 이름 + 페이로드
+// }
+
+// 서버 2가 이 패킷을 받으면:
+// 1. rooms: ['room1'] 확인
+// 2. 자기 로컬 소켓 중 room1에 속한 소켓 필터링
+// 3. 해당 소켓에만 전송
+```
+
+---
+
+## 왜 Redis Pub/Sub인가?
+
+Redis Pub/Sub가 이 용도에 적합한 이유:
+
+### 1. 속도
+
+Redis는 인메모리 기반이라 Pub/Sub 지연이 마이크로초 수준입니다. WebSocket 이벤트는 실시간성이 중요하므로, 메시지 브로커의 지연이 곧 사용자 경험에 직결됩니다.
+
+### 2. Fire-and-forget
+
+Socket.io 이벤트는 대부분 실시간 데이터입니다. 커서 위치, 타이핑 인디케이터, 좌표 업데이트 같은 것들은 놓쳐도 다음 이벤트가 곧 옵니다. Kafka처럼 메시지를 영속화할 필요가 없습니다.
+
+### 3. 단순함
+
+Pub/Sub는 Redis에 내장된 기능이라 별도 브로커를 설치할 필요 없습니다. 이미 캐시나 세션 저장소로 Redis를 쓰고 있다면 추가 인프라 비용이 0입니다.
+
+### 한계
+
+- **메시지 유실**: 구독자가 없으면 메시지는 사라집니다. 서버가 재시작되는 동안의 메시지는 놓칩니다.
+- **영속화 없음**: 메시지 히스토리가 없습니다. 재접속 시 이전 이벤트를 다시 받을 수 없습니다.
+- **스케일 한계**: 구독자가 많아질수록 Redis의 CPU 사용량이 선형으로 증가합니다.
+
+이런 한계를 보완하려면 **Redis Streams**를 함께 사용합니다. (Yjs 상태 영속화에 Redis Streams를 쓰는 이유이기도 합니다.)
+
+---
+
+## 실전: ECS 멀티 인스턴스 구성
+
+AWS ECS Fargate에서 Socket.io를 여러 태스크로 운영할 때의 구성입니다:
+
+```
+                    ┌─────────────┐
+                    │     ALB      │
+                    │ (Sticky     │
+                    │  Sessions)  │
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        ┌─────▼────┐ ┌────▼─────┐ ┌────▼─────┐
+        │ ECS Task │ │ ECS Task │ │ ECS Task │
+        │ Socket.io│ │ Socket.io│ │ Socket.io│
+        │ +Adapter │ │ +Adapter │ │ +Adapter │
+        └─────┬────┘ └────┬─────┘ └────┬─────┘
+              │            │            │
+              └────────────┼────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │ ElastiCache  │
+                    │   Redis      │
+                    └──────────────┘
+```
+
+### Sticky Session이 필요한 이유
+
+Socket.io의 HTTP 핸드셰이크와 WebSocket 업그레이드가 같은 서버로 가야 합니다. ALB에서 sticky session을 설정합니다:
+
+```
+Target Group 설정:
+  - Stickiness: enabled
+  - Duration: 1 day
+  - Cookie: AWSALB (application-based)
+```
+
+### 연결 코드
+
+```typescript
+import { Server } from 'socket.io'
+import { createAdapter } from '@socket.io/redis-adapter'
+import { createClient } from 'redis'
+
+const REDIS_URL = process.env.REDIS_URL // ElastiCache 엔드포인트
+
+async function bootstrap() {
+  const pubClient = createClient({ url: REDIS_URL })
+  const subClient = pubClient.duplicate()
+
+  await Promise.all([pubClient.connect(), subClient.connect()])
+
+  const io = new Server(3000, {
+    adapter: createAdapter(pubClient, subClient),
+    cors: { origin: '*' },
+  })
+
+  io.on('connection', (socket) => {
+    // 이제 어느 인스턴스에 연결되든 브로드캐스트가 동작한다
+    socket.on('canvas:update', (data) => {
+      socket.to(data.roomId).emit('canvas:update', data)
+    })
+  })
+}
+```
+
+### Redis 연결이 끊어지면?
+
+Redis Adapter는 Redis 연결이 끊어져도 **로컬 브로드캐스트는 계속 동작**합니다. 같은 서버에 연결된 클라이언트끼리는 정상 통신됩니다. Redis가 복구되면 인스턴스 간 동기화가 자동으로 재개됩니다.
+
+```typescript
+pubClient.on('error', (err) => {
+  console.error('Redis pub error:', err)
+  // 로컬 브로드캐스트는 계속 동작
+  // Redis 복구 시 자동 재연결
+})
+```
+
+---
+
+## Redis Adapter vs Redis Streams Adapter
+
+Socket.io는 두 가지 Redis 기반 어댑터를 제공합니다:
+
+| | Redis Adapter (Pub/Sub) | Redis Streams Adapter |
+|---|---|---|
+| **패키지** | `@socket.io/redis-adapter` | `@socket.io/redis-streams-adapter` |
+| **메커니즘** | Pub/Sub (PUBLISH/SUBSCRIBE) | Streams (XADD/XREAD) |
+| **메시지 유실** | 구독자 없으면 유실 | Stream에 보존 |
+| **재접속 시** | 놓친 메시지 복구 불가 | Stream에서 재생 가능 |
+| **Connection State Recovery** | 미지원 | 지원 |
+| **성능** | 더 빠름 (단순 push) | 약간 느림 (Stream 읽기) |
+| **적합한 경우** | 실시간 이벤트 (커서, 타이핑) | 메시지 유실이 허용 안 되는 경우 |
+
+Connection State Recovery가 필요하다면 Streams Adapter를, 순수 실시간 이벤트만 다룬다면 Pub/Sub Adapter가 적합합니다.
+
+---
+
+## 정리
+
+```
+io.to('room').emit('event', data)
+
+  ├─ 로컬: room에 속한 자기 서버 소켓에 직접 전송
+  │
+  └─ Redis PUBLISH → 다른 서버의 SUBSCRIBE가 수신
+                      → 각 서버가 room 멤버 필터링 후 전송
+```
+
+Redis Adapter의 핵심은 이 한 줄입니다: **Redis Pub/Sub를 서버 간 메시지 버스로 사용하여, 어느 인스턴스에서 emit하든 모든 인스턴스가 해당 이벤트를 받아 로컬 소켓에 전달한다.**
+
+설정은 `createAdapter(pubClient, subClient)` 한 줄이지만, 그 안에서 벌어지는 일을 이해하면 스케일링 이슈를 디버깅할 때 큰 도움이 됩니다.
+
+---
+
+## 참고 자료
+
+- [Socket.io Redis Adapter 공식 문서](https://socket.io/docs/v4/redis-adapter/)
+- [Redis Pub/Sub 문서](https://redis.io/docs/latest/develop/pubsub/)
+- [@socket.io/redis-adapter GitHub](https://github.com/socketio/socket.io-redis-adapter)
+- [@socket.io/redis-streams-adapter GitHub](https://github.com/socketio/socket.io-redis-streams-adapter)

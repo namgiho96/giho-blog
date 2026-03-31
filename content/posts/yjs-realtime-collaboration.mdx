@@ -1,0 +1,402 @@
+---
+title: "Yjs로 실시간 협업 만들기 - CRDT의 마법"
+date: "2026-03-31"
+description: "Google Docs, Figma는 어떻게 여러 사람이 동시에 편집해도 충돌이 없을까? Yjs와 CRDT의 원리를 코드와 함께 파헤쳐봅니다."
+tags: ["yjs", "crdt", "realtime", "collaboration", "websocket"]
+---
+
+## 들어가며
+
+Google Docs에서 동료와 동시에 문서를 편집해본 적 있나요? 서로 다른 곳에서 타이핑해도 충돌 없이 자연스럽게 합쳐지죠. Figma에서 여러 디자이너가 동시에 작업하는 것도 마찬가지입니다.
+
+이런 **실시간 협업**의 핵심에는 **CRDT**라는 기술이 있고, JavaScript 생태계에서 가장 널리 쓰이는 CRDT 라이브러리가 바로 **Yjs**입니다.
+
+---
+
+## CRDT란 무엇인가?
+
+**CRDT**(Conflict-free Replicated Data Type)는 **충돌 없이 복제되는 데이터 타입**입니다.
+
+핵심 아이디어는 간단합니다:
+
+> 여러 사용자가 각자의 복사본을 독립적으로 수정하더라도, 나중에 합치면 모두 같은 결과가 된다.
+
+수학적으로 보면, CRDT의 merge 연산은 **교환법칙**(순서 상관없음)과 **멱등법칙**(중복 적용해도 결과 동일)을 만족합니다. 덕분에 네트워크 지연이나 순서 뒤바뀜을 걱정할 필요가 없습니다.
+
+### OT vs CRDT
+
+실시간 협업을 구현하는 두 가지 대표적인 접근법이 있습니다:
+
+| | OT (Operational Transformation) | CRDT |
+|---|---|---|
+| **동작 방식** | 서버가 동시 편집 연산을 변환하여 충돌 해결 | 데이터 구조 자체가 충돌을 수학적으로 불가능하게 만듦 |
+| **서버 의존성** | 중앙 서버 필수 (변환 로직) | 서버 없이도 P2P 동기화 가능 |
+| **복잡도** | 연산 조합이 늘수록 변환 로직이 기하급수적으로 복잡 | 데이터 타입만 잘 설계하면 자동 해결 |
+| **오프라인 지원** | 어렵거나 불가능 | 자연스럽게 지원 |
+| **대표 사례** | Google Docs (초기), ShareDB | Yjs, Automerge, Figma |
+
+OT는 오랫동안 표준이었지만, **구현 복잡도**와 **서버 의존성** 때문에 최근에는 CRDT 기반 솔루션으로 옮겨가는 추세입니다.
+
+---
+
+## Yjs 소개
+
+**Yjs**는 Kevin Jahns가 만든 고성능 CRDT 라이브러리입니다. 주요 특징은:
+
+- **경량**: 순수 Yjs 코어는 약 5KB (gzipped)
+- **고성능**: 바이너리 인코딩으로 네트워크 대역폭 최소화
+- **풍부한 생태계**: 에디터 바인딩, 네트워크 프로바이더, 영속성 어댑터
+- **프레임워크 무관**: React, Vue, Svelte 등 어디서든 사용 가능
+
+### 핵심 데이터 타입
+
+Yjs는 JavaScript의 기본 자료구조에 대응하는 **공유 타입(Shared Types)**을 제공합니다:
+
+| Yjs 타입 | JavaScript 대응 | 용도 |
+|---|---|---|
+| `Y.Doc` | — | 최상위 문서 컨테이너 |
+| `Y.Map` | `Map` / `Object` | 키-값 저장소 (설정, 메타데이터) |
+| `Y.Array` | `Array` | 순서 있는 리스트 (노드 목록, 레이어) |
+| `Y.Text` | `String` | 서식 있는 텍스트 (문서, 코멘트) |
+| `Y.XmlElement` | `Element` | XML/HTML 구조 (리치 텍스트 에디터) |
+
+모든 공유 타입은 하나의 `Y.Doc` 안에 존재하며, 이 문서 단위로 동기화됩니다.
+
+---
+
+## 기본 사용법
+
+### Y.Doc 생성과 공유 타입 정의
+
+```typescript
+import * as Y from 'yjs'
+
+const doc = new Y.Doc()
+
+// 같은 이름으로 접근하면 모든 피어가 동일한 데이터를 공유
+const ymap = doc.getMap('shared-state')
+const yarray = doc.getArray('node-list')
+const ytext = doc.getText('document')
+```
+
+### Y.Map — 공유 상태 관리
+
+캔버스 에디터에서 노드의 위치나 속성을 공유할 때 `Y.Map`이 유용합니다:
+
+```typescript
+const ymap = doc.getMap('canvas-settings')
+
+ymap.set('zoom', 1.0)
+ymap.set('theme', 'dark')
+ymap.set('gridEnabled', true)
+
+console.log(ymap.get('zoom'))       // 1.0
+console.log(ymap.has('theme'))      // true
+console.log(ymap.size)              // 3
+
+// 다른 사용자의 변경도 여기서 잡힌다
+ymap.observe((event) => {
+  event.changes.keys.forEach((change, key) => {
+    if (change.action === 'add') {
+      console.log(`"${key}" 추가됨: ${ymap.get(key)}`)
+    } else if (change.action === 'update') {
+      console.log(`"${key}" 변경됨: ${change.oldValue} → ${ymap.get(key)}`)
+    } else if (change.action === 'delete') {
+      console.log(`"${key}" 삭제됨`)
+    }
+  })
+})
+
+ymap.set('zoom', 2.0) // => "zoom" 변경됨: 1 → 2
+```
+
+### Y.Text — 협업 텍스트 편집
+
+`Y.Text`는 서식까지 지원하는 공유 텍스트 타입입니다:
+
+```typescript
+const ytext = doc.getText('document')
+
+ytext.insert(0, 'Hello, ')
+ytext.insert(7, 'World!')
+
+// 서식도 지원한다 (Quill Delta 호환)
+ytext.insert(0, '굵은 텍스트', { bold: true })
+ytext.format(0, 5, { italic: true })
+
+// 현재 내용 확인
+console.log(ytext.toString()) // "굵은 텍스트Hello, World!"
+console.log(ytext.toDelta())  // Quill Delta 형식으로 변환
+```
+
+### Y.Array — 순서 있는 목록 관리
+
+노드 리스트나 레이어 순서를 관리할 때 사용합니다:
+
+```typescript
+const yarray = doc.getArray('layers')
+
+yarray.push(['background'])
+yarray.push(['foreground'])
+yarray.insert(1, ['middle-layer'])
+
+console.log(yarray.toArray()) // ['background', 'middle-layer', 'foreground']
+
+yarray.observe((event) => {
+  console.log('변경 delta:', event.changes.delta)
+})
+
+// 중첩도 가능 — 배열 안에 Map을 넣을 수 있다
+const nodeData = new Y.Map()
+nodeData.set('id', 'node-1')
+nodeData.set('x', 100)
+nodeData.set('y', 200)
+yarray.push([nodeData])
+```
+
+### 트랜잭션 — 원자적 변경
+
+여러 변경을 하나로 묶어서 이벤트를 한 번만 발생시킬 수 있습니다:
+
+```typescript
+doc.transact(() => {
+  ymap.set('width', 500)
+  ymap.set('height', 300)
+  yarray.push(['new-item'])
+  // 이 블록 안의 모든 변경이 하나의 update로 묶인다
+})
+```
+
+---
+
+## 동기화 아키텍처
+
+Yjs의 동기화는 **프로바이더(Provider)** 패턴으로 추상화되어 있습니다.
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Client A   │     │   Client B   │     │   Client C   │
+│   Y.Doc      │     │   Y.Doc      │     │   Y.Doc      │
+│   + Provider │     │   + Provider │     │   + Provider │
+└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+       │                    │                    │
+       └────────────┬───────┴────────────────────┘
+                    │
+              ┌─────▼─────┐
+              │  WebSocket │
+              │   Server   │
+              └─────┬──────┘
+                    │
+              ┌─────▼──────┐
+              │  Persistence│
+              │  (DB/File)  │
+              └─────────────┘
+```
+
+### 프로바이더란?
+
+프로바이더는 Y.Doc의 변경사항을 **외부와 동기화하는 어댑터**입니다. Yjs 생태계의 주요 프로바이더들:
+
+| 프로바이더 | 역할 | 패키지 |
+|---|---|---|
+| **y-websocket** | WebSocket 기반 클라이언트-서버 동기화 | `y-websocket` |
+| **y-webrtc** | WebRTC 기반 P2P 동기화 | `y-webrtc` |
+| **y-indexeddb** | 브라우저 IndexedDB에 로컬 영속화 | `y-indexeddb` |
+| **Hocuspocus** | 프로덕션급 WebSocket 백엔드 | `@hocuspocus/server` |
+
+### WebSocket 프로바이더 연결 예시
+
+```typescript
+import * as Y from 'yjs'
+import { WebsocketProvider } from 'y-websocket'
+
+const doc = new Y.Doc()
+
+// WebSocket 서버에 연결
+const provider = new WebsocketProvider(
+  'wss://your-server.com',  // WebSocket 서버 URL
+  'my-room-name',           // 룸(문서) 이름
+  doc                       // 동기화할 Y.Doc
+)
+
+// 연결 상태 모니터링
+provider.on('status', (event: { status: string }) => {
+  console.log('연결 상태:', event.status) // 'connecting', 'connected', 'disconnected'
+})
+
+// 이제 doc의 모든 변경이 자동으로 동기화된다!
+const ymap = doc.getMap('shared')
+ymap.set('hello', 'world') // → 다른 클라이언트에도 즉시 반영
+```
+
+### 오프라인 + 온라인 동시 지원
+
+프로바이더는 여러 개를 동시에 사용할 수 있습니다:
+
+```typescript
+import { IndexeddbPersistence } from 'y-indexeddb'
+
+const doc = new Y.Doc()
+
+// 1. 로컬 영속화 — 오프라인에서도 데이터 유지
+const indexeddbProvider = new IndexeddbPersistence('my-doc', doc)
+
+// 2. 네트워크 동기화 — 온라인이면 실시간 동기화
+const wsProvider = new WebsocketProvider('wss://server.com', 'my-room', doc)
+
+// 오프라인 → 로컬 IndexedDB에서 복원
+// 온라인 → WebSocket으로 실시간 동기화
+// 재연결 → 오프라인 중 변경사항이 자동으로 merge
+```
+
+이것이 CRDT의 강점입니다. 오프라인에서 수정한 내용이 네트워크가 복구되면 **충돌 없이 자동으로 합쳐집니다**.
+
+---
+
+## Awareness — 커서와 프레즌스
+
+실시간 협업에서 "누가 어디를 보고 있는지"도 중요합니다. Yjs의 **Awareness** 프로토콜이 이걸 담당합니다:
+
+```typescript
+const awareness = provider.awareness
+
+// 내 정보 설정
+awareness.setLocalState({
+  user: {
+    name: '김개발',
+    color: '#ff6b6b',
+  },
+  cursor: { x: 150, y: 300 },
+})
+
+// 다른 사용자 정보 구독
+awareness.on('change', () => {
+  const states = awareness.getStates()
+  states.forEach((state, clientId) => {
+    if (clientId !== doc.clientID) {
+      console.log(`${state.user.name}의 커서: (${state.cursor.x}, ${state.cursor.y})`)
+    }
+  })
+})
+```
+
+Awareness는 휘발성 데이터로, 사용자가 나가면 자동으로 사라집니다. 커서 위치, 선택 영역, 온라인 상태 같은 일시적인 정보에 적합합니다.
+
+---
+
+## 실전 팁: 프로덕션에서의 Yjs
+
+### 1. 업데이트 크기 최적화 — Nested Y.Map 패턴
+
+공유 데이터를 설계할 때 가장 큰 실수는 **전체 객체를 하나의 값으로 저장**하는 것입니다:
+
+```typescript
+// 나쁜 예: 노드 하나 바뀌면 전체 데이터를 전송
+ymap.set('nodes', JSON.stringify(allNodes)) // 10~50KB per update
+
+// 좋은 예: Nested Y.Map으로 필드별 분리
+const nodesMap = doc.getMap('nodes')
+const node1 = new Y.Map()
+node1.set('x', 100)
+node1.set('y', 200)
+node1.set('width', 300)
+node1.set('label', '시작')
+nodesMap.set('node-1', node1)
+
+// x 좌표만 바꾸면 ~200B만 전송!
+node1.set('x', 150)
+```
+
+Nested Y.Map 패턴을 쓰면 업데이트 크기를 **99% 이상 줄일 수 있습니다**.
+
+### 2. 상태 벡터와 증분 동기화
+
+Yjs는 **상태 벡터(State Vector)**를 사용해 증분 동기화를 합니다. 이미 가지고 있는 데이터는 다시 받지 않습니다:
+
+```typescript
+import * as Y from 'yjs'
+
+// 클라이언트의 현재 상태 벡터
+const stateVector = Y.encodeStateVector(doc)
+
+// 서버에서 차이(diff)만 받아오기
+const diff = Y.encodeStateAsUpdate(serverDoc, stateVector)
+
+// diff만 적용
+Y.applyUpdate(doc, diff)
+```
+
+### 3. 메모리 관리 — 히스토리 가비지 컬렉션
+
+Yjs의 Y.Doc은 편집 히스토리를 내부에 유지합니다. 장시간 사용하면 메모리가 늘어날 수 있으므로, 가비지 컬렉션을 고려하세요:
+
+```typescript
+const doc = new Y.Doc({ gc: true }) // 기본값이 true
+
+// gc: true이면 삭제된 항목의 내용이 가비지 컬렉션됨
+// 단, undo/redo를 사용하려면 UndoManager 범위 안의 항목은 보존됨
+```
+
+### 4. 서버 사이드 영속화 전략
+
+프로덕션에서는 Y.Doc의 바이너리 상태를 DB에 저장하는 것이 일반적입니다:
+
+```typescript
+import * as Y from 'yjs'
+
+// Y.Doc → 바이너리로 인코딩 (DB 저장용)
+const encoded: Uint8Array = Y.encodeStateAsUpdate(doc)
+
+// 바이너리 → Y.Doc 복원
+const restoredDoc = new Y.Doc()
+Y.applyUpdate(restoredDoc, encoded)
+```
+
+MongoDB나 PostgreSQL의 `bytea` 타입에 바이너리를 저장하고, 클라이언트가 접속하면 이 상태를 기반으로 동기화를 시작합니다.
+
+### 5. UndoManager — 실행 취소/다시 실행
+
+사용자별 Undo/Redo도 Yjs가 기본 제공합니다:
+
+```typescript
+const ytext = doc.getText('document')
+const undoManager = new Y.UndoManager(ytext)
+
+ytext.insert(0, 'Hello')
+undoManager.undo() // 'Hello' 삭제됨
+undoManager.redo() // 'Hello' 복원됨
+```
+
+핵심은 UndoManager가 **로컬 사용자의 변경만 추적**한다는 점입니다. 다른 사용자가 추가한 텍스트를 실수로 되돌리지 않습니다.
+
+---
+
+## Yjs 생태계 한눈에 보기
+
+| 에디터 | 바인딩 패키지 | 용도 |
+|---|---|---|
+| **Quill** | `y-quill` | 리치 텍스트 에디터 |
+| **ProseMirror** | `y-prosemirror` | 구조화된 문서 에디터 |
+| **Monaco** | `y-monaco` | VS Code 스타일 코드 에디터 |
+| **CodeMirror** | `y-codemirror` | 경량 코드 에디터 |
+| **TipTap** | `y-prosemirror` (공유) | 헤드리스 에디터 프레임워크 |
+| **BlockSuite** | 내장 지원 | Notion 스타일 블록 에디터 |
+
+에디터 바인딩을 사용하면, 에디터의 내부 상태를 Y.Doc에 양방향으로 연결해줍니다.
+
+---
+
+## 마치며
+
+Yjs는 "실시간 협업"이라는 복잡한 문제를 놀라울 정도로 깔끔하게 추상화한 라이브러리입니다.
+
+CRDT가 충돌을 없애주고, 프로바이더가 네트워크를 추상화하고, 풍부한 에디터 바인딩이 통합을 쉽게 만들어줍니다. 여기에 오프라인 지원까지 자연스럽게 따라오니, 협업 기능을 구현한다면 Yjs는 가장 먼저 고려할 선택지입니다.
+
+---
+
+## 참고 자료
+
+- [Yjs 공식 문서](https://docs.yjs.dev)
+- [Yjs GitHub](https://github.com/yjs/yjs)
+- [CRDT.tech — CRDT 리소스 모음](https://crdt.tech)
+- [Kevin Jahns의 CRDT 알고리즘 논문](https://www.researchgate.net/publication/310212186_Near_Real-Time_Peer-to-Peer_Shared_Editing_on_Extensible_Data_Types)
